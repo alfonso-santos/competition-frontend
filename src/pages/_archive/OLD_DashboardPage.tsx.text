@@ -1,0 +1,1115 @@
+// src/pages/DashboardPage.tsx
+import { useEffect, useMemo, useState } from "react";
+
+import { HeaderBar } from "../components/layout/HeaderBar";
+import { StatCard } from "../components/ui/StatCard";
+import { SecondaryBlueButton, PrimaryGreenButton } from "../components/ui/Button";
+import { Badge } from "../components/ui/Badge";
+
+import { EquityChart } from "../components/charts/EquityChart";
+import { ProgressCharts } from "../components/charts/ProgressCharts";
+
+import { equityFromLogReturns } from "../lib/series";
+import { parseNumber, parseWeightsText } from "../lib/parse";
+import { pickFirstNumber } from "../lib/utils";
+import { pretty } from "../lib/pretty";
+import { formatWhen } from "../lib/date";
+import { primaryMetricLabel } from "../lib/metrics";
+
+import { useApp } from "../context/AppContext";
+
+export type MeResponse = {
+  contest_id: string;
+  contest: any;
+  participant: any;
+  attempts: any;
+  leaderboard_me: any;
+};
+
+export type SubmitResponse = {
+  status: "ok" | "duplicate";
+  contest_id: string;
+  submission_id: string;
+  score: number;
+  primary_metric: string;
+  metrics: Record<string, any>;
+  portfolio_returns?: number[];
+  attempts?: any;
+};
+
+export type LeaderboardResponse = {
+  contest_id: string;
+  contest: any;
+  limit: number;
+  top: Array<{
+    rank: number;
+    actor_id: string;
+    actor_type?: string;
+    team_id?: string | null;
+    best_score?: number | null;
+    last_score?: number | null;
+    n_submissions?: number | null;
+    primary_metric?: string | null;
+  }>;
+  me?: any;
+
+  total_participants?: number;
+  around_me?: any[];
+};
+
+export type SubmissionListItem = {
+  submission_id: string;
+  status?: "ok" | "duplicate";
+  score?: number | null;
+  primary_metric?: string | null;
+  created_at?: string | null;
+  rank_at_submit?: number | null;
+  metrics?: Record<string, any>;
+  validated?: any;
+
+  // some backends may return nested as well
+  submission?: any;
+};
+
+const METRIC_SHORT: Record<string, string> = {
+  annual_return: "Ret",
+  annual_vol: "Vol",
+  max_drawdown: "MDD",
+  sharpe: "Sharpe",
+  sortino: "Sortino",
+  calmar: "Calmar",
+  var: "VaR",
+  cvar: "CVaR",
+  kurtosis: "Kurt",
+  time_under_water: "TuW",
+  alpha: "α",
+  n_obs: "N",
+  freq: "Freq",
+};
+
+function formatMetricShort(k: string, v: any): string {
+  const label = METRIC_SHORT[k] ?? k;
+  const x = Number(v);
+  if (!Number.isFinite(x)) return `${label}: —`;
+
+  const pctKeys = new Set(["annual_return", "annual_vol", "max_drawdown", "var", "cvar"]);
+  if (pctKeys.has(k)) return `${label}: ${(x * 100).toFixed(2)}%`;
+
+  return `${label}: ${x.toFixed(4)}`;
+}
+
+function toCsv(rows: Array<Record<string, any>>, headers: string[]): string {
+  const esc = (x: any) => {
+    const s = x === null || x === undefined ? "" : String(x);
+    if (s.includes(",") || s.includes('"') || s.includes("\n")) return `"${s.replaceAll('"', '""')}"`;
+    return s;
+  };
+  const lines = [headers.join(",")];
+  for (const r of rows) lines.push(headers.map((h) => esc(r[h])).join(","));
+  return lines.join("\n");
+}
+
+function downloadText(filename: string, content: string, mime = "text/plain;charset=utf-8") {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * --- Key fix ---
+ * Your "detail" JSON looks like:
+ * { contest_id, submission_id, submission: { ... created_at, validated, metrics, score, ... } }
+ * We support both { ... } and { submission: { ... } }.
+ */
+function unwrapSubmission(x: any): any {
+  if (!x) return null;
+  return x.submission ?? x;
+}
+function getCreatedAt(x: any): string | null {
+  const s = unwrapSubmission(x);
+  return (s?.created_at ?? null) as any;
+}
+function getScore(x: any): number | null {
+  const s = unwrapSubmission(x);
+  const v = s?.score ?? x?.score;
+  return Number.isFinite(Number(v)) ? Number(v) : null;
+}
+function getPrimaryMetric(x: any): string | null {
+  const s = unwrapSubmission(x);
+  return (s?.primary_metric ?? x?.primary_metric ?? null) as any;
+}
+function getMetrics(x: any): Record<string, any> | null {
+  const s = unwrapSubmission(x);
+  const m = s?.metrics ?? x?.metrics ?? null;
+  return m && typeof m === "object" ? m : null;
+}
+function getValidated(x: any): any {
+  const s = unwrapSubmission(x);
+  return s?.validated ?? x?.validated ?? null;
+}
+function getWeightsFromValidated(x: any): number[] | null {
+  const v = getValidated(x);
+  const w = v?.weights ?? null;
+  return Array.isArray(w) ? w.map((z: any) => Number(z)) : null;
+}
+function getFixedIncomeFromValidated(x: any): number | null {
+  const v = getValidated(x);
+  const fi = v?.fixed_income_weight ?? v?.fixedIncomeWeight ?? null;
+  return Number.isFinite(Number(fi)) ? Number(fi) : null;
+}
+
+/**
+ * Series payload can also vary.
+ * We accept:
+ * - { equity: [...] }
+ * - { portfolio_returns: [...] } or { returns: [...] }
+ * - { submission_id, series: { ... } }
+ */
+function unwrapSeries(x: any): any {
+  if (!x) return null;
+  return x.series ?? x;
+}
+
+export default function DashboardPage() {
+  const {
+    apiStatus,
+    user,
+    logout,
+
+    selectedContestId,
+    selectedContestItem,
+    contestPublic,
+    setPage,
+
+    meData,
+    meBusy,
+    meError,
+    loadMe,
+
+    submitBusy,
+    submitError,
+    submitResult,
+    submitWeights,
+
+    weightsText,
+    setWeightsText,
+    fixedIncomeWeight,
+    setFixedIncomeWeight,
+
+    lbBusy,
+    lbError,
+    lbData,
+    loadLeaderboard,
+
+    histBusy,
+    histError,
+    histItems,
+    loadSubmissions,
+
+    histSelectedId,
+    setHistSelectedId,
+    histDetailBusy,
+    histDetailError,
+    histDetail,
+    loadSubmissionDetail,
+
+    histSeriesBusy,
+    histSeriesError,
+    histSeries,
+    loadSubmissionSeries,
+  } = useApp();
+
+  const contest = contestPublic ?? selectedContestItem?.contest ?? null;
+
+  const participantStatus = String(meData?.participant?.status ?? "");
+  const isActive = participantStatus.toLowerCase() === "active";
+
+  const nAssets = Number(contest?.rules?.n_assets ?? 0) || 0;
+  const primaryMetricKey = String(contest?.ranking?.primary_metric ?? "");
+  const primaryMetricLabelText = primaryMetricLabel(primaryMetricKey);
+  const order = String(contest?.ranking?.order ?? "desc").toLowerCase();
+
+  const attempts = meData?.attempts ?? null;
+  const lbMe = meData?.leaderboard_me ?? null;
+
+  const dailyLeft = pickFirstNumber(
+    attempts?.left_before?.daily_left,
+    attempts?.left_before?.daily_submissions_left,
+    attempts?.left?.daily_submissions_left,
+    attempts?.daily_left,
+    attempts?.daily_submissions_left
+  );
+
+  const totalLeft = pickFirstNumber(
+    attempts?.left_before?.total_left,
+    attempts?.left_before?.total_submissions_left,
+    attempts?.left?.total_submissions_left,
+    attempts?.total_left,
+    attempts?.total_submissions_left
+  );
+
+  const bestScore = pickFirstNumber(lbMe?.best_score);
+
+  // Latest submission from history (DESC by created_at)
+  const latestHist: SubmissionListItem | null = histItems?.length ? (histItems[0] as any) : null;
+
+  // Rank to show: prefer rank_at_submit from latest submission; fallback to leaderboard_me.rank
+  const rankFromLatestSubmit = Number.isFinite(Number(latestHist?.rank_at_submit)) ? Number(latestHist?.rank_at_submit) : null;
+  const rankFromLeaderboard = pickFirstNumber(lbMe?.rank);
+  const rankToShow = rankFromLatestSubmit ?? rankFromLeaderboard;
+
+  // Gap vs #1 (needs leaderboard data)
+  const top1 = (lbData as any)?.top?.[0];
+  const top1Score = pickFirstNumber(top1?.best_score, top1?.last_score);
+  const gapVsTop1 = (() => {
+    if (rankToShow === null) return null;
+    if (rankToShow === 1) return 0;
+    if (bestScore === null || top1Score === null) return null;
+    return order === "asc" ? bestScore - top1Score : top1Score - bestScore;
+  })();
+
+  const canSubmit = isActive && !submitBusy && !meBusy;
+
+  // Preview (submit card)
+  const preview = useMemo(() => {
+    const parsed = parseWeightsText(weightsText, nAssets);
+    const fi = parseNumber(fixedIncomeWeight);
+    const fiOk = fi !== null && fi >= 0 && fi <= 1;
+
+    let sumAssets: number | null = null;
+    if (parsed.ok && parsed.weights) sumAssets = parsed.weights.reduce((a: number, b: number) => a + b, 0);
+
+    const total = sumAssets === null || !fiOk || fi === null ? null : sumAssets + fi;
+
+    return {
+      weightsOk: parsed.ok,
+      weightsErr: parsed.ok ? "" : parsed.error || "Invalid weights.",
+      nEntered: parsed.ok && parsed.weights ? parsed.weights.length : 0,
+      sumAssets,
+      fi,
+      fiOk,
+      total,
+      totalOk: total !== null ? Math.abs(total - 1.0) <= 1e-3 : false,
+    };
+  }, [weightsText, fixedIncomeWeight, nAssets]);
+
+  // Load full series (effectively "all")
+  const FULL_TAIL = 1_000_000;
+
+  // Auto-load /me + history
+  useEffect(() => {
+    if (!selectedContestId) return;
+    if (!meData && !meBusy) loadMe();
+    if (isActive && (!histItems || histItems.length === 0) && !histBusy) loadSubmissions(50);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedContestId, isActive]);
+
+  // Auto-load last submission series/detail once history exists
+  const [autoLastId, setAutoLastId] = useState<string>("");
+  useEffect(() => {
+    if (!histItems?.length) return;
+    if (autoLastId) return;
+
+    const latest = histItems[0] as any;
+    const id = latest?.submission_id;
+    if (!id) return;
+
+    setAutoLastId(id);
+    loadSubmissionSeries(id, FULL_TAIL);
+    loadSubmissionDetail(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [histItems, autoLastId]);
+
+  // Auto-select latest in history section if none selected
+  useEffect(() => {
+    if (!histItems?.length) return;
+    if (histSelectedId) return;
+
+    const latest = histItems[0] as any;
+    const id = latest?.submission_id;
+    if (!id) return;
+
+    setHistSelectedId(id);
+    loadSubmissionDetail(id);
+    loadSubmissionSeries(id, FULL_TAIL);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [histItems, histSelectedId]);
+
+  // Equity series:
+  // - If submitResult contains returns -> show that
+  // - Else show loaded history series (from selected/last submission)
+  const equityFromSubmit = useMemo(() => {
+    const r = submitResult?.portfolio_returns ?? [];
+    if (!Array.isArray(r) || !r.length) return [];
+    return equityFromLogReturns(r);
+  }, [submitResult]);
+
+  const equityFromHistorySeries = useMemo(() => {
+    const s = unwrapSeries(histSeries);
+    const eq = s?.equity;
+    if (Array.isArray(eq) && eq.length) return eq.map((v: any, i: number) => ({ t: i + 1, equity: Number(v) }));
+
+    const r = s?.portfolio_returns ?? s?.returns ?? [];
+    if (Array.isArray(r) && r.length) return equityFromLogReturns(r);
+
+    return [];
+  }, [histSeries]);
+
+  const equitySeries = equityFromSubmit.length ? equityFromSubmit : equityFromHistorySeries;
+
+  // Last result: prefer submitResult; else show latest from history
+  const lastStatus = (submitResult as any) ?? (latestHist as any) ?? null;
+
+  // --- FIX: metrics location (flat OR nested) ---
+  const metricsSource =
+    submitResult?.metrics && Object.keys(submitResult.metrics).length
+      ? submitResult.metrics
+      : getMetrics(latestHist)
+      ? (getMetrics(latestHist) as any)
+      : getMetrics(histDetail)
+      ? (getMetrics(histDetail) as any)
+      : null;
+
+  const keyMetricOrder = ["annual_return", "annual_vol", "max_drawdown", "var", "cvar", "sortino", "calmar"];
+  const keyMetricKeys = keyMetricOrder.filter((k) => k !== primaryMetricKey);
+
+  // Progress charts series
+  const progressSeries = useMemo(() => {
+    const items = [...(histItems ?? [])].reverse();
+    const out: Array<{ t: number; score: number | null; rank: number | null }> = [];
+    let k = 0;
+    for (const it of items as any[]) {
+      k += 1;
+      out.push({
+        t: k,
+        score: Number.isFinite(Number(getScore(it))) ? Number(getScore(it)) : Number.isFinite(Number(it.score)) ? Number(it.score) : null,
+        rank: Number.isFinite(Number(it.rank_at_submit)) ? Number(it.rank_at_submit) : null,
+      });
+    }
+    return out;
+  }, [histItems]);
+
+  // -------------------------------
+  // Leaderboard display rules
+  // -------------------------------
+  const [lbExpanded, setLbExpanded] = useState(false);
+
+  const totalParticipants =
+    (lbData as any)?.total_participants ??
+    (lbData as any)?.total ??
+    (lbData as any)?.n_participants ??
+    null;
+
+  const topRowsAll = ((lbData as any)?.top ?? []) as any[];
+  const top1Row = topRowsAll.length ? topRowsAll[0] : null;
+
+  const aroundRowsRaw =
+    ((lbData as any)?.around_me ?? (lbData as any)?.around ?? (lbData as any)?.neighbors ?? []) as any[];
+
+  const myRankForLb = pickFirstNumber((lbData as any)?.me?.rank, rankFromLeaderboard, rankFromLatestSubmit);
+
+  const showAllBecauseSmall = (() => {
+    if (typeof totalParticipants === "number") return totalParticipants <= 20;
+    return topRowsAll.length > 0 && topRowsAll.length <= 20;
+  })();
+
+  const showTop20Only = !showAllBecauseSmall && myRankForLb !== null && Number(myRankForLb) <= 20;
+
+  const topRowsToShow = useMemo(() => {
+    if (!lbExpanded) return top1Row ? [top1Row] : [];
+    if (showAllBecauseSmall) return topRowsAll;
+    return topRowsAll.slice(0, 20);
+  }, [lbExpanded, showAllBecauseSmall, topRowsAll, top1Row]);
+
+  const aroundRowsToShow = useMemo(() => {
+    if (!lbExpanded) return [];
+    if (showAllBecauseSmall) return [];
+    if (showTop20Only) return [];
+    if (myRankForLb === null || Number(myRankForLb) <= 20) return [];
+    const inTop = new Set((topRowsAll.slice(0, 20) ?? []).map((r: any) => String(r.rank)));
+    return (aroundRowsRaw ?? []).filter((r: any) => !inTop.has(String(r.rank)));
+  }, [lbExpanded, showAllBecauseSmall, showTop20Only, myRankForLb, topRowsAll, aroundRowsRaw]);
+
+  // -------------------------------
+  // My submissions selector/actions
+  // -------------------------------
+  const submissionOptions = useMemo(() => {
+    const items = (histItems ?? []) as any[];
+    return items.map((it) => {
+      const when = formatWhen(getCreatedAt(it) ?? it.created_at);
+      const sc = getScore(it);
+      const score = sc === null ? "—" : sc.toFixed(4);
+      const r = Number.isFinite(Number(it.rank_at_submit)) ? String(Math.round(Number(it.rank_at_submit))) : "—";
+      return { id: it.submission_id, label: `${when} · Score ${score} · Rank ${r}` };
+    });
+  }, [histItems]);
+
+  const selectedListItem = useMemo(() => {
+    const items = (histItems ?? []) as any[];
+    return items.find((x) => x.submission_id === histSelectedId) ?? null;
+  }, [histItems, histSelectedId]);
+
+  // --- FIX: validated/weights may live under histDetail.submission.validated ---
+  const selectedWeights =
+    getWeightsFromValidated(histDetail) ??
+    getWeightsFromValidated(selectedListItem);
+
+  const selectedFiWeight =
+    getFixedIncomeFromValidated(histDetail) ??
+    getFixedIncomeFromValidated(selectedListItem);
+
+  async function copyWeightsAsText() {
+    if (!Array.isArray(selectedWeights) || !selectedWeights.length) return;
+    const txt = selectedWeights.map((x: any) => String(Number(x))).join(", ");
+    try {
+      await navigator.clipboard.writeText(txt);
+    } catch {
+      // ignore
+    }
+  }
+
+  function downloadSelectedWeightsJson() {
+    // Include both weights + fixed_income_weight (even if user usually doesn't need FI series)
+    const payload = {
+      submission_id: histSelectedId || null,
+      fixed_income_weight: selectedFiWeight ?? null,
+      weights: Array.isArray(selectedWeights) ? selectedWeights : null,
+    };
+    downloadText(
+      `weights_${histSelectedId || "selected"}.json`,
+      JSON.stringify(payload, null, 2),
+      "application/json;charset=utf-8"
+    );
+  }
+
+  function downloadEquityCsv() {
+    const rows = equityFromHistorySeries.map((p) => ({ t: p.t, equity: p.equity }));
+    const csv = toCsv(rows, ["t", "equity"]);
+    downloadText(`equity_${histSelectedId || "selected"}.csv`, csv, "text/csv;charset=utf-8");
+  }
+
+  async function copySubmissionId() {
+    if (!histSelectedId) return;
+    try {
+      await navigator.clipboard.writeText(histSelectedId);
+    } catch {
+      // ignore
+    }
+  }
+
+  // --- FIX: selected metrics may be under histDetail.submission.metrics ---
+  const selectedMetrics =
+    getMetrics(histDetail) ??
+    getMetrics(selectedListItem);
+
+  return (
+    <>
+      <HeaderBar
+        title="Portfolio Optimization Competition"
+        apiStatus={apiStatus}
+        user={undefined as any}
+        busy={false as any}
+        onLogout={logout}
+        envLabel="DEV"
+        right={
+          <div className="flex w-full flex-col items-end gap-2">
+            <div className="flex items-center justify-end">
+              <img
+                src="/brand/uam.png"
+                alt="UAM"
+                className="h-9 w-auto select-none"
+                loading="eager"
+              />
+            </div>
+
+            <div className="text-sm text-slate-700">
+              Logged in as{" "}
+              <span className="font-semibold text-slate-900">{user?.email ?? "—"}</span>
+            </div>
+
+            <div className="flex w-full justify-end gap-2">
+              <SecondaryBlueButton type="button" onClick={() => setPage("select")}>
+                Back
+              </SecondaryBlueButton>
+
+              <SecondaryBlueButton type="button" onClick={loadMe} disabled={meBusy}>
+                {meBusy ? "Refreshing…" : "Refresh"}
+              </SecondaryBlueButton>
+
+              <SecondaryBlueButton type="button" onClick={logout} disabled={!user}>
+                Logout
+              </SecondaryBlueButton>
+            </div>
+          </div>
+        }
+      />
+
+      <main className="mx-auto max-w-5xl px-6">
+        {/* =======================
+            SECTION 1: CURRENT
+           ======================= */}
+        <section className="mt-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <h2 className="text-2xl font-semibold text-slate-900">Current</h2>
+              {participantStatus ? (
+                isActive ? (
+                  <Badge text="ACTIVE" tone="green" />
+                ) : (
+                  <Badge text={participantStatus.toUpperCase()} tone="amber" />
+                )
+              ) : (
+                <Badge text="—" tone="gray" />
+              )}
+            </div>
+
+            <div className="text-[15px] text-slate-700">
+              {contest?.name ? (
+                <span className="font-semibold text-slate-900">{String(contest.name)}</span>
+              ) : null}
+            </div>
+          </div>
+
+          {meError ? (
+            <div className="mt-4 rounded-2xl bg-rose-50 p-3 text-base text-rose-800 ring-1 ring-rose-200">
+              {meError}
+            </div>
+          ) : null}
+
+          <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <StatCard label="Your rank" value={rankToShow === null ? "—" : String(rankToShow)} />
+            <StatCard
+              label={`Your best (${primaryMetricLabelText || "metric"})`}
+              value={bestScore === null ? "—" : Number(bestScore).toFixed(4)}
+            />
+            <StatCard label="Gap vs #1" value={gapVsTop1 === null ? "—" : Number(gapVsTop1).toFixed(4)} />
+            <StatCard
+              label="Attempts left (Today / Total)"
+              value={`${dailyLeft === null ? "—" : dailyLeft} / ${totalLeft === null ? "—" : totalLeft}`}
+            />
+          </div>
+
+          <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2 lg:items-stretch">
+            {/* Left: Submit */}
+            <div className="rounded-3xl bg-white/80 p-6 ring-1 ring-slate-200 backdrop-blur shadow-sm h-full flex flex-col">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <h3 className="text-lg font-semibold">Submit weights</h3>
+                </div>
+                <PrimaryGreenButton type="button" onClick={submitWeights} disabled={!canSubmit}>
+                  {submitBusy ? "Submitting…" : "Submit"}
+                </PrimaryGreenButton>
+              </div>
+
+              {!isActive ? (
+                <div className="mt-4 rounded-2xl bg-amber-50 p-3 text-base text-amber-800 ring-1 ring-amber-200">
+                  You are not ACTIVE in this contest, so you cannot submit.
+                </div>
+              ) : null}
+
+              {submitError ? (
+                <div className="mt-4 rounded-2xl bg-rose-50 p-3 text-base text-rose-800 ring-1 ring-rose-200">
+                  {submitError}
+                </div>
+              ) : null}
+
+              <div className="mt-5 space-y-4 flex-1">
+                <label className="block">
+                  <span className="text-sm font-medium text-slate-600">Weights ({nAssets || "—"} values)</span>
+                  <textarea
+                    value={weightsText}
+                    onChange={(e) => setWeightsText(e.target.value)}
+                    placeholder="Example (5 assets): 0.2, 0.2, 0.2, 0.2, 0.2"
+                    rows={5}
+                    className="mt-1 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-base outline-none focus:border-slate-300"
+                  />
+                  <div className="mt-2 text-sm text-slate-500">
+                    Accepted separators: commas, spaces, new lines, semicolons.
+                  </div>
+                </label>
+
+                <label className="block">
+                  <span className="text-sm font-medium text-slate-600">Fixed income weight</span>
+                  <input
+                    value={fixedIncomeWeight}
+                    onChange={(e) => setFixedIncomeWeight(e.target.value)}
+                    placeholder="e.g. 0.00"
+                    className="mt-1 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-base outline-none focus:border-slate-300"
+                  />
+                  <div className="mt-2 text-sm text-slate-500">
+                    Use 0 if your contest has no fixed-income component.
+                  </div>
+                </label>
+
+                <div className="rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200">
+                  <div className="text-sm font-semibold text-slate-900">Preview</div>
+                  <div className="mt-2 text-sm text-slate-700 space-y-1">
+                    <div>
+                      Entered: <span className="font-semibold text-slate-900">{preview.nEntered}</span> /{" "}
+                      {nAssets || "—"}
+                    </div>
+                    <div>
+                      Sum (assets):{" "}
+                      <span className="font-semibold text-slate-900">
+                        {preview.sumAssets === null ? "—" : preview.sumAssets.toFixed(2)}
+                      </span>
+                    </div>
+                    <div>
+                      Fixed income:{" "}
+                      <span className="font-semibold text-slate-900">
+                        {preview.fiOk && preview.fi !== null ? preview.fi.toFixed(2) : "—"}
+                      </span>
+                    </div>
+                    <div>
+                      Total:{" "}
+                      <span className="font-semibold text-slate-900">
+                        {preview.total === null ? "—" : preview.total.toFixed(2)}
+                      </span>{" "}
+                      {preview.total !== null ? (
+                        preview.totalOk ? (
+                          <span className="ml-2 text-emerald-700 font-semibold">OK</span>
+                        ) : (
+                          <span className="ml-2 text-rose-700 font-semibold">Must equal 1</span>
+                        )
+                      ) : null}
+                    </div>
+
+                    {!preview.weightsOk ? <div className="mt-2 text-rose-700">{preview.weightsErr}</div> : null}
+                    {!preview.fiOk ? (
+                      <div className="mt-2 text-rose-700">Fixed income weight must be between 0 and 1.</div>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Right: Equity + Last result */}
+            <div className="h-full flex flex-col gap-6">
+              <div className="rounded-3xl bg-white/80 p-4 ring-1 ring-slate-200 backdrop-blur shadow-sm">
+                <EquityChart title="Equity curve" series={equitySeries} height={260} canExpand />
+              </div>
+
+              <div className="rounded-3xl bg-white/80 p-6 ring-1 ring-slate-200 backdrop-blur shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-lg font-semibold">Last result</div>
+                  {submitResult ? (
+                    submitResult.status === "ok" ? (
+                      <Badge text="Submission accepted" tone="green" />
+                    ) : (
+                      <Badge text="Duplicate (not counted)" tone="amber" />
+                    )
+                  ) : latestHist ? (
+                    <Badge text="Loaded from history" tone="gray" />
+                  ) : (
+                    <Badge text="No submissions yet" tone="gray" />
+                  )}
+                </div>
+
+                {lastStatus ? (
+                  <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+                    <div className="rounded-3xl bg-white p-5 ring-1 ring-slate-200">
+                      <div className="text-sm font-semibold text-slate-900">Score</div>
+                      <div className="mt-2 text-3xl font-semibold tracking-tight text-slate-900">
+                        {(() => {
+                          const sc = Number.isFinite(Number((lastStatus as any).score))
+                            ? Number((lastStatus as any).score)
+                            : Number.isFinite(Number(getScore(lastStatus)))
+                            ? Number(getScore(lastStatus))
+                            : null;
+                          return sc === null ? "—" : sc.toFixed(4);
+                        })()}
+                      </div>
+                      <div className="mt-1 text-sm text-slate-600">
+                        {primaryMetricLabel(getPrimaryMetric(lastStatus) ?? primaryMetricKey)}
+                      </div>
+                      {getCreatedAt(lastStatus) ? (
+                        <div className="mt-2 text-xs text-slate-500">{formatWhen(getCreatedAt(lastStatus) as any)}</div>
+                      ) : null}
+                      <div className="mt-4 h-1 w-full rounded-full" style={{ backgroundColor: "rgba(74,119,41,0.35)" }} />
+                    </div>
+
+                    <div className="rounded-3xl bg-slate-50 p-5 ring-1 ring-slate-200 md:col-span-2">
+                      <div className="text-sm font-semibold text-slate-900">Key metrics</div>
+
+                      {metricsSource ? (
+                        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 text-[15px] text-slate-700">
+                          {keyMetricKeys
+                            .filter((k) => k in metricsSource)
+                            .map((k) => (
+                              <div key={k} className="flex gap-2">
+                                <span className="mt-2 h-1.5 w-1.5 flex-none rounded-full bg-slate-400" />
+                                <span>{formatMetricShort(k, (metricsSource as any)[k])}</span>
+                              </div>
+                            ))}
+                        </div>
+                      ) : (
+                        <div className="mt-3 text-sm text-slate-600">No metrics available for this result yet.</div>
+                      )}
+
+                      {metricsSource ? (
+                        <details className="mt-4">
+                          <summary className="cursor-pointer text-sm font-medium text-slate-600 underline decoration-slate-300 underline-offset-4 hover:text-slate-900">
+                            Show all metrics
+                          </summary>
+                          <ul className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 text-[15px] text-slate-700">
+                            {Object.keys(metricsSource ?? {})
+                              .filter((k) => k !== primaryMetricKey)
+                              .sort()
+                              .map((k) => (
+                                <li key={k} className="flex gap-2">
+                                  <span className="mt-2 h-1.5 w-1.5 flex-none rounded-full bg-slate-400" />
+                                  <span>{formatMetricShort(k, (metricsSource as any)[k])}</span>
+                                </li>
+                              ))}
+                          </ul>
+                        </details>
+                      ) : null}
+
+                      <details className="mt-4">
+                        <summary className="cursor-pointer text-sm font-medium text-slate-600 underline decoration-slate-300 underline-offset-4 hover:text-slate-900">
+                          Show last result JSON
+                        </summary>
+                        <pre className="mt-2 max-h-72 overflow-auto rounded-2xl bg-slate-900/90 p-3 text-xs text-slate-100 ring-1 ring-slate-800">
+{pretty(lastStatus)}
+                        </pre>
+                      </details>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-4 text-base text-slate-700">
+                    Submit your first portfolio (or load history) to see metrics and equity here.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* =======================
+            SECTION 2: HISTORY
+           ======================= */}
+        <section className="mt-10 pb-10">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-2xl font-semibold text-slate-900">History</h2>
+              <p className="mt-1 text-[15px] text-slate-700">Leaderboard and your submission history.</p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <SecondaryBlueButton type="button" onClick={() => loadSubmissions(50)} disabled={histBusy}>
+                {histBusy ? "Refreshing…" : "Refresh history"}
+              </SecondaryBlueButton>
+
+              <PrimaryGreenButton
+                type="button"
+                onClick={() => {
+                  setLbExpanded(true);
+                  loadLeaderboard(200);
+                }}
+                disabled={!isActive || lbBusy || meBusy}
+              >
+                {lbBusy ? "Loading…" : "Load leaderboard"}
+              </PrimaryGreenButton>
+
+              {lbExpanded ? (
+                <SecondaryBlueButton type="button" onClick={() => setLbExpanded(false)} disabled={lbBusy}>
+                  Back to #1
+                </SecondaryBlueButton>
+              ) : null}
+            </div>
+          </div>
+
+          {/* Leaderboard */}
+          <div className="mt-6 rounded-3xl bg-white/80 p-6 ring-1 ring-slate-200 backdrop-blur shadow-sm">
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-semibold">Leaderboard</h3>
+                <p className="mt-1 text-base text-slate-700">
+                  {lbExpanded
+                    ? showAllBecauseSmall
+                      ? "All participants (≤ 20)."
+                      : showTop20Only
+                      ? "Top 20."
+                      : "Top 20 + around you (±2)."
+                    : "Showing #1 only."}
+                </p>
+              </div>
+
+              {typeof totalParticipants === "number" ? (
+                <div className="text-sm text-slate-600">
+                  Participants: <span className="font-semibold text-slate-900">{totalParticipants}</span>
+                </div>
+              ) : null}
+            </div>
+
+            {!isActive ? (
+              <div className="mt-4 rounded-2xl bg-amber-50 p-3 text-base text-amber-800 ring-1 ring-amber-200">
+                You are not ACTIVE in this contest, so you cannot view the leaderboard.
+              </div>
+            ) : null}
+
+            {lbError ? (
+              <div className="mt-4 rounded-2xl bg-rose-50 p-3 text-base text-rose-800 ring-1 ring-rose-200">{lbError}</div>
+            ) : null}
+
+            {topRowsToShow?.length ? (
+              <div className="mt-4 overflow-auto rounded-2xl ring-1 ring-slate-200 bg-white">
+                <table className="min-w-full text-left text-sm">
+                  <thead className="bg-slate-50 text-slate-700">
+                    <tr>
+                      <th className="px-4 py-3 font-semibold">Rank</th>
+                      <th className="px-4 py-3 font-semibold">Best</th>
+                      <th className="px-4 py-3 font-semibold">Submissions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-slate-800">
+                    {topRowsToShow.map((row: any) => (
+                      <tr key={`${row.rank}-${row.actor_id}`} className="border-t border-slate-100">
+                        <td className="px-4 py-3 font-semibold">{row.rank}</td>
+                        <td className="px-4 py-3">
+                          {row.best_score === null || row.best_score === undefined ? "—" : Number(row.best_score).toFixed(4)}
+                        </td>
+                        <td className="px-4 py-3">{row.n_submissions ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="mt-4 text-base text-slate-700">{lbBusy ? "Loading leaderboard…" : "No leaderboard loaded yet."}</div>
+            )}
+
+            {aroundRowsToShow.length ? (
+              <div className="mt-5">
+                <div className="text-sm font-semibold text-slate-900">Around you (±2)</div>
+                <div className="mt-2 overflow-auto rounded-2xl ring-1 ring-slate-200 bg-white">
+                  <table className="min-w-full text-left text-sm">
+                    <thead className="bg-slate-50 text-slate-700">
+                      <tr>
+                        <th className="px-4 py-3 font-semibold">Rank</th>
+                        <th className="px-4 py-3 font-semibold">Best</th>
+                        <th className="px-4 py-3 font-semibold">Submissions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="text-slate-800">
+                      {aroundRowsToShow.map((row: any) => (
+                        <tr
+                          key={`around-${row.rank}-${row.actor_id}`}
+                          className={`border-t border-slate-100 ${String(row.rank) === String(myRankForLb) ? "bg-sky-50/40" : ""}`}
+                        >
+                          <td className="px-4 py-3 font-semibold">{row.rank}</td>
+                          <td className="px-4 py-3">
+                            {row.best_score === null || row.best_score === undefined ? "—" : Number(row.best_score).toFixed(4)}
+                          </td>
+                          <td className="px-4 py-3">{row.n_submissions ?? "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          {/* My submissions */}
+          <div className="mt-6 rounded-3xl bg-white/80 p-6 ring-1 ring-slate-200 backdrop-blur shadow-sm">
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-semibold">My submissions</h3>
+                <p className="mt-1 text-base text-slate-700">Progress + inspect one submission in detail.</p>
+              </div>
+            </div>
+
+            {histError ? (
+              <div className="mt-4 rounded-2xl bg-rose-50 p-3 text-base text-rose-800 ring-1 ring-rose-200">{histError}</div>
+            ) : null}
+
+            <div className="mt-5">
+              <ProgressCharts series={progressSeries} />
+            </div>
+
+            {/* Selector + actions */}
+            <div className="mt-6 rounded-3xl bg-slate-50 p-5 ring-1 ring-slate-200">
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-12 lg:items-center">
+                <div className="lg:col-span-6">
+                  <div className="text-sm font-semibold text-slate-900">Select submission</div>
+                  <select
+                    value={histSelectedId || ""}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      setHistSelectedId(id);
+                      if (id) {
+                        loadSubmissionDetail(id);
+                        loadSubmissionSeries(id, FULL_TAIL);
+                      }
+                    }}
+                    className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-slate-300"
+                  >
+                    <option value="" disabled>
+                      {histBusy ? "Loading…" : submissionOptions.length ? "Choose a submission" : "No submissions found"}
+                    </option>
+                    {submissionOptions.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="lg:col-span-6">
+                  <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
+                    <SecondaryBlueButton
+                      type="button"
+                      onClick={() => {
+                        if (histSelectedId) {
+                          loadSubmissionDetail(histSelectedId);
+                          loadSubmissionSeries(histSelectedId, FULL_TAIL);
+                        }
+                      }}
+                      disabled={!histSelectedId || histDetailBusy || histSeriesBusy}
+                    >
+                      {histDetailBusy || histSeriesBusy ? "Refreshing…" : "Refresh selected"}
+                    </SecondaryBlueButton>
+
+                    <PrimaryGreenButton type="button" onClick={copyWeightsAsText} disabled={!histSelectedId || !selectedWeights?.length}>
+                      Copy weights
+                    </PrimaryGreenButton>
+
+                    <SecondaryBlueButton
+                      type="button"
+                      onClick={downloadEquityCsv}
+                      disabled={!histSelectedId || !equityFromHistorySeries.length}
+                    >
+                      Download equity CSV
+                    </SecondaryBlueButton>
+
+                    <button
+                      type="button"
+                      onClick={downloadSelectedWeightsJson}
+                      disabled={!histSelectedId || !selectedWeights?.length}
+                      className="px-2 py-2 text-sm font-medium text-slate-600 underline decoration-slate-300 underline-offset-4 hover:text-slate-900 disabled:opacity-50 disabled:hover:text-slate-600"
+                    >
+                      Download JSON
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Detail */}
+            <div className="mt-6 rounded-3xl bg-white p-6 ring-1 ring-slate-200">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-lg font-semibold">Selected submission</div>
+                  <div className="mt-1 text-sm text-slate-600">
+                    {selectedListItem ? formatWhen(getCreatedAt(selectedListItem) ?? selectedListItem.created_at) : "—"}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-4 text-sm text-slate-700">
+                  <div>
+                    Score:{" "}
+                    <span className="font-semibold text-slate-900">
+                      {(() => {
+                        const sc = getScore(histDetail) ?? getScore(selectedListItem) ?? (Number.isFinite(Number(selectedListItem?.score)) ? Number(selectedListItem?.score) : null);
+                        return sc === null ? "—" : sc.toFixed(4);
+                      })()}
+                    </span>
+                  </div>
+                  <div>
+                    Rank at submit:{" "}
+                    <span className="font-semibold text-slate-900">
+                      {Number.isFinite(Number(selectedListItem?.rank_at_submit)) ? String(Math.round(Number(selectedListItem?.rank_at_submit))) : "—"}
+                    </span>
+                  </div>
+                  <div>
+                    Fixed income:{" "}
+                    <span className="font-semibold text-slate-900">
+                      {selectedFiWeight === null ? "—" : Number(selectedFiWeight).toFixed(4)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {histDetailError ? (
+                <div className="mt-4 rounded-2xl bg-rose-50 p-3 text-sm text-rose-800 ring-1 ring-rose-200">
+                  {histDetailError}
+                </div>
+              ) : null}
+              {histSeriesError ? (
+                <div className="mt-4 rounded-2xl bg-rose-50 p-3 text-sm text-rose-800 ring-1 ring-rose-200">
+                  {histSeriesError}
+                </div>
+              ) : null}
+
+              <div className="mt-5 grid grid-cols-1 gap-6 lg:grid-cols-3">
+                <div className="lg:col-span-2">
+                  <div className="rounded-3xl bg-white p-5 ring-1 ring-slate-200">
+                    <EquityChart title="Equity (selected)" series={equityFromHistorySeries} height={300} canExpand />
+                    {histSeriesBusy ? <div className="mt-3 text-sm text-slate-600">Loading series…</div> : null}
+                  </div>
+                </div>
+
+                <div className="lg:col-span-1">
+                  <div className="rounded-3xl bg-slate-50 p-5 ring-1 ring-slate-200 h-full">
+                    <div className="text-sm font-semibold text-slate-900">Key metrics</div>
+
+                    {selectedMetrics ? (
+                      <div className="mt-3 grid grid-cols-1 gap-2 text-[15px] text-slate-700">
+                        {keyMetricOrder
+                          .filter((k) => k in selectedMetrics && k !== primaryMetricKey)
+                          .slice(0, 10)
+                          .map((k) => (
+                            <div key={k} className="flex gap-2">
+                              <span className="mt-2 h-1.5 w-1.5 flex-none rounded-full bg-slate-400" />
+                              <span>{formatMetricShort(k, (selectedMetrics as any)[k])}</span>
+                            </div>
+                          ))}
+                      </div>
+                    ) : (
+                      <div className="mt-3 text-sm text-slate-600">{histDetailBusy ? "Loading…" : "No metrics available."}</div>
+                    )}
+
+                    <details className="mt-5">
+                      <summary className="cursor-pointer text-sm font-medium text-slate-600 underline decoration-slate-300 underline-offset-4 hover:text-slate-900">
+                        Show detail JSON
+                      </summary>
+                      <pre className="mt-2 max-h-72 overflow-auto rounded-2xl bg-slate-900/90 p-3 text-xs text-slate-100 ring-1 ring-slate-800">
+{histDetail ? pretty(histDetail) : histDetailBusy ? "Loading…" : "—"}
+                      </pre>
+                    </details>
+
+                    <details className="mt-4">
+                      <summary className="cursor-pointer text-sm font-medium text-slate-600 underline decoration-slate-300 underline-offset-4 hover:text-slate-900">
+                        Advanced
+                      </summary>
+                      <div className="mt-2 text-xs text-slate-700 space-y-2">
+                        <div>
+                          Submission id:{" "}
+                          <span className="font-mono text-[11px] text-slate-600 break-all">{histSelectedId || "—"}</span>
+                        </div>
+                        <SecondaryBlueButton type="button" onClick={copySubmissionId} disabled={!histSelectedId} className="px-3 py-2 text-xs">
+                          Copy submission id
+                        </SecondaryBlueButton>
+                      </div>
+                    </details>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {!histItems?.length && !histBusy ? (
+              <div className="mt-6 text-base text-slate-700">No submissions found.</div>
+            ) : null}
+          </div>
+        </section>
+      </main>
+    </>
+  );
+}

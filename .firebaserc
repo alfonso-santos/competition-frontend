@@ -1,0 +1,8 @@
+{
+  "projects": {
+    "default": "portfolio-challenge",
+    "portfolio-challenge": "portfolio-challenge"
+  },
+  "targets": {},
+  "etags": {}
+}

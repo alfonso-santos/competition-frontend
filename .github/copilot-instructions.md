@@ -1,0 +1,18 @@
+# Copilot Instructions
+- Purpose: single-page React + TS + Vite app for a portfolio-competition portal; all UX lives in [src/App.tsx](src/App.tsx) with page states `landing` → `select` → `dashboard`.
+- Key deps: React 19, Firebase auth, Tailwind v4 (imported in [src/index.css](src/index.css)); Vite config in [vite.config.ts](vite.config.ts) is default.
+- Auth: initialized in [src/lib/firebase.ts](src/lib/firebase.ts); user ID token is fetched for every API call.
+- API helpers: use [src/lib/api.ts](src/lib/api.ts) `apiFetch` for authed calls and `publicFetch` for public health check; both require `VITE_API_BASE_URL` in `.env.local` (restart dev server after adding). Errors surface `detail/message` from responses.
+- Data flow: `onAuthStateChanged` in [src/App.tsx](src/App.tsx) resets contest/me/leaderboard state on logout, sets `page` to `landing`, and clears errors. Login sets `page` to `select` and triggers `loadContests`.
+- Contest selection: `/contests` populates `contests`; first contest auto-selected if none. Changing selection clears errors/messages and triggers `/me` via `loadMe` effect.
+- Briefing: `buildBriefing()` assembles rules/limits/metrics cards from contest JSON; obeys constraints like leverage vs sum=1, only shows allocation range when not the default.
+- Submission rules: `validateSubmitInputs()` enforces `n_assets`, user `ACTIVE`, numeric weights/fixed-income ∈ [0,1], and total weight ≈ 1. Errors stored in `submitError`.
+- Submit flow: `submitWeights()` POSTs to `/contests/{id}/submit`, shows `submitResult`, then refreshes `/me`; duplicate submissions are signaled via `status: "duplicate"`.
+- Leaderboard: `loadLeaderboard(limit=50)` fetches `/leaderboard?limit=`; viewing requires `ACTIVE` status.
+- Dataset download: `downloadTrainDataset()` GETs `/dataset/train` with bearer token; uses `showSaveFilePicker` when available, falls back to anchor download.
+- UX patterns: keep focus/selection for controlled inputs (email/password/weights). Status chips/badges show API status, participant status, submission status. Debug panels expose raw JSON for contest, `/me`, `/submit`, `/leaderboard`.
+- Styling: gradient background class `soft-bg` in [src/index.css](src/index.css); brand color `--brand-green` used for primary buttons/chips; UI uses Tailwind utility classes and semi-transparent cards.
+- Env/setup: copy `.env.local` and set `VITE_API_BASE_URL=https://...`; Firebase config baked in. Commands: `npm install`; `npm run dev` for local; `npm run build` (tsc project refs + vite build); `npm run lint`; `npm run preview`.
+- When adding API calls, prefer `apiFetch` so tokens + JSON handling stay consistent; surface errors to UI strings like existing patterns.
+- Keep new UI inside [src/App.tsx](src/App.tsx) page sections unless extracting components; no other components directory is used currently (folder empty).
+- Tests: none present; manual flows rely on UI and API JSON debug sections.
