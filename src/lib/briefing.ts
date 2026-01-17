@@ -41,7 +41,6 @@ export function buildBriefingBlocks(contest: any): BriefingBlocks {
 
   const maxFi = Number(contest?.max_fixed_income_weight);
 
-
   const atAGlance: BriefingBlockChip[] = [
     { label: "Metric", value: primary ? `${primaryMetricLabel(primary)} • ${better}` : "—", tone: "blue" },
     { label: "Assets", value: nAssets ? String(nAssets) : "—", tone: "gray" },

@@ -48,11 +48,14 @@ export type LeaderboardResponse = {
     actor_id: string;
     actor_type?: string;
     team_id?: string | null;
+    display_name?: string | null;
+    // email?: string | null;      // <-- opcional
     best_score?: number | null;
     last_score?: number | null;
     n_submissions?: number | null;
     primary_metric?: string | null;
   }>;
+
   me?: any;
   total_participants?: number;
   around_me?: any[];
@@ -881,6 +884,7 @@ export default function DashboardPage() {
                   <thead className="bg-slate-50 text-slate-700">
                     <tr>
                       <th className="px-4 py-3 font-semibold">Rank</th>
+                      <th className="px-4 py-3 font-semibold">User</th>
                       <th className="px-4 py-3 font-semibold">Best</th>
                       <th className="px-4 py-3 font-semibold">Submissions</th>
                     </tr>
@@ -889,6 +893,7 @@ export default function DashboardPage() {
                     {topRowsToShow.map((row: any) => (
                       <tr key={`${row.rank}-${row.actor_id}`} className="border-t border-slate-100">
                         <td className="px-4 py-3 font-semibold">{row.rank}</td>
+                        <td className="px-4 py-3">{row.display_name || row.actor_id}</td>
                         <td className="px-4 py-3 tabular-nums">
                           {row.best_score === null || row.best_score === undefined ? "—" : Number(row.best_score).toFixed(3)}
                         </td>
