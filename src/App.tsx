@@ -1,13 +1,14 @@
 // src/App.tsx
-import { useApp } from "./context/AppContext";
+import { useApp } from "./context/useApp";
 
 import LandingPage from "./pages/LandingPage";
 import SelectBriefingPage from "./pages/SelectBriefingPage";
 import DashboardPage from "./pages/DashboardPage";
 import CompetitionSummaryPage from "./pages/CompetitionSummaryPage";
+import AdminCreateContestPage from "./pages/AdminCreateContestPage";
 
 export default function App() {
-  const { page } = useApp();
+  const { page, isAdmin } = useApp();
 
   return (
     <div className="soft-bg min-h-screen text-slate-900">
@@ -18,6 +19,12 @@ export default function App() {
           <SelectBriefingPage />
         ) : page === "summary" ? (
           <CompetitionSummaryPage />
+        ) : page === "admin_create" ? (
+          isAdmin ? (
+            <AdminCreateContestPage />
+          ) : (
+            <SelectBriefingPage />
+          )
         ) : (
           <DashboardPage />
         )}

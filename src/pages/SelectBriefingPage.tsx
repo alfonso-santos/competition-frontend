@@ -5,7 +5,32 @@ import { Chip } from "../components/ui/Chip";
 import { AccentCard } from "../components/ui/AccentCard";
 import { buildBriefingBlocks } from "../lib/briefing";
 import { getContestId } from "../lib/utils";
-import { useApp } from "../context/AppContext";
+import { useApp } from "../context/useApp";
+
+function getContestDescPrefix(c: any, cid: string): string {
+  // Prefer explicit description field if present
+  const desc = String(c?.contest?.description ?? "").trim();
+  if (desc) return desc;
+
+  // Fallback: parse prefix from contest_id: <desc>_(dev|prod)_...
+  const m = String(cid).match(/^([a-z0-9-]+)_(dev|prod)_.+$/i);
+  if (!m) return "";
+  const p = (m[1] || "").toLowerCase();
+  if (p === "dev" || p === "prod") return ""; // no description prefix
+  return p;
+}
+
+function formatContestOptionLabel(c: any): string {
+  const cid = getContestId(c);
+  const baseName = c?.contest?.name ? String(c.contest.name) : cid;
+
+  const prefix = getContestDescPrefix(c, cid);
+  if (!prefix) return c?.contest?.name ? `${baseName} (${cid})` : cid;
+
+  // Put description FIRST
+  return `${prefix.toUpperCase()} - ${baseName} `;
+}
+
 
 export default function SelectBriefingPage() {
   const {
@@ -27,6 +52,11 @@ export default function SelectBriefingPage() {
     downloadTrainDataset,
     trainBusy,
     trainMsg,
+
+    isAdmin,
+    adminBusy,
+    adminError,
+    checkAdminAccess,
 
     setPage,
   } = useApp();
@@ -98,18 +128,38 @@ export default function SelectBriefingPage() {
             <div className="text-sm text-slate-700">
               Logged in as{" "}
               <span className="font-semibold text-slate-900">
-                {user?.email ?? "—"}
+                {user?.email ?? "-"}
               </span>
+            </div>
+
+            <div className="text-xs text-slate-600">
+              {adminBusy
+                ? "Checking admin access..."
+                : isAdmin
+                ? "Admin access enabled"
+                : "Standard user access"}
             </div>
 
             {/* Buttons: Reload (left) + Logout (right) on same line */}
             <div className="flex w-full justify-end gap-2">
+              {isAdmin ? (
+                <SecondaryBlueButton type="button" onClick={() => setPage("admin_create")}>
+                  Admin panel
+                </SecondaryBlueButton>
+              ) : null}
+
+              {!isAdmin && adminError ? (
+                <SecondaryBlueButton type="button" onClick={() => void checkAdminAccess()}>
+                  Retry admin check
+                </SecondaryBlueButton>
+              ) : null}
+
               <SecondaryBlueButton
                 type="button"
                 onClick={loadContests}
                 disabled={contestsBusy}
               >
-                {contestsBusy ? "Loading…" : "Reload contests"}
+                {contestsBusy ? "Loading..." : "Reload contests"}
               </SecondaryBlueButton>
 
               <SecondaryBlueButton type="button" onClick={logout} disabled={!user}>
@@ -150,14 +200,14 @@ export default function SelectBriefingPage() {
               >
                 <option value="" disabled>
                   {contestsBusy
-                    ? "Loading…"
+                    ? "Loading..."
                     : contests.length
                     ? "Select a competition"
                     : "No competitions found"}
                 </option>
                 {contests.map((c: any) => {
                   const cid = getContestId(c);
-                  const label = c?.contest?.name ? `${c.contest.name} (${cid})` : cid;
+                  const label = formatContestOptionLabel(c);
                   return (
                     <option key={cid} value={cid}>
                       {label}
@@ -251,7 +301,7 @@ export default function SelectBriefingPage() {
               onClick={downloadTrainDataset}
               disabled={!selectedContestId || trainBusy}
             >
-              {trainBusy ? "Downloading…" : "Download training data"}
+              {trainBusy ? "Downloading..." : "Download training data"}
             </SecondaryBlueButton>
 
             <PrimaryGreenButton

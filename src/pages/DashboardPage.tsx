@@ -18,7 +18,7 @@ import { formatWhen } from "../lib/date";
 import { primaryMetricLabel } from "../lib/metrics";
 import { ProgressCharts } from "../components/charts/ProgressCharts";
 
-import { useApp } from "../context/AppContext";
+import { useApp } from "../context/useApp";
 
 export type MeResponse = {
   contest_id: string;
@@ -208,9 +208,6 @@ function coerceBoolish(v: any, fallback = false): boolean {
 function isContestFinished(contest: any): boolean {
   if (!contest) return false;
 
-  const status = String(contest?.status ?? "").trim().toLowerCase();
-  if (["finished", "ended", "closed", "completed"].includes(status)) return true;
-
   const endRaw =
     contest?.end_at ??
     contest?.end_date ??
@@ -220,9 +217,25 @@ function isContestFinished(contest: any): boolean {
     null;
 
   if (endRaw) {
-    const t = new Date(String(endRaw)).getTime();
-    if (Number.isFinite(t) && Date.now() > t) return true;
+    const raw = String(endRaw).trim();
+
+    // If backend sends a date-only value (YYYY-MM-DD), treat it as end-of-day.
+    const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m) {
+      const y = Number(m[1]);
+      const mon = Number(m[2]) - 1;
+      const d = Number(m[3]);
+      const endOfDayTs = new Date(y, mon, d, 23, 59, 59, 999).getTime();
+      return Number.isFinite(endOfDayTs) && Date.now() > endOfDayTs;
+    }
+
+    const t = new Date(raw).getTime();
+    if (Number.isFinite(t)) return Date.now() > t;
+    return false;
   }
+
+  const status = String(contest?.status ?? "").trim().toLowerCase();
+  if (["finished", "ended", "closed", "completed"].includes(status)) return true;
 
   return false;
 }

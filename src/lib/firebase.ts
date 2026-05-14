@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getAuth, setPersistence, inMemoryPersistence } from "firebase/auth";
+import { getAuth, setPersistence, browserSessionPersistence  } from "firebase/auth";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBS8PoYjqttetJqzSaB3Z2KCiHefc6dxDg",
@@ -15,4 +15,4 @@ const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 
 // 👇 esto hace que al cerrar el navegador, se pierda la sesión
-setPersistence(auth, inMemoryPersistence).catch(console.error);
+setPersistence(auth, browserSessionPersistence).catch(console.error);

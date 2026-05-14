@@ -1,14 +1,15 @@
 // src/state/AppContext.tsx
-import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, type User } from "firebase/auth";
 import { auth } from "../lib/firebase";
 import { apiFetch, publicFetch } from "../lib/api";
 import { parseNumber, parseWeightsText, countDecimalsToken, validateWeightsSign } from "../lib/parse";
 import { getContestId } from "../lib/utils";
 import { safeFilenameFromContentDisposition } from "../lib/download";
+import { AppContext } from "./AppContext.shared";
 
 export type ApiStatus = "checking" | "ok" | "down" | "missing_base_url";
-type Page = "landing" | "select" | "dashboard" | "summary";
+type Page = "landing" | "select" | "dashboard" | "summary" | "admin_create";
 
 export type ContestItem = Record<string, any>;
 
@@ -69,6 +70,15 @@ export type SubmissionSeries = {
   created_at?: string;
 };
 
+export type AdminAccessResponse = {
+  status?: string;
+  is_admin?: boolean;
+  uid?: string;
+  email?: string | null;
+  env_effective?: string;
+  collection?: string;
+};
+
 export type AppContextValue = {
   // env/ui
   baseUrl: string;
@@ -92,6 +102,10 @@ export type AppContextValue = {
   setMsg: React.Dispatch<React.SetStateAction<string>>;
   login: () => Promise<void>;
   logout: () => Promise<void>;
+  isAdmin: boolean;
+  adminBusy: boolean;
+  adminError: string;
+  checkAdminAccess: () => Promise<boolean>;
 
   // contests
   contestsBusy: boolean;
@@ -154,14 +168,6 @@ export type AppContextValue = {
   loadSubmissionSeries: (submissionId: string, tail: number) => Promise<void>;
 };
 
-const AppContext = createContext<AppContextValue | null>(null);
-
-export function useApp(): AppContextValue {
-  const ctx = useContext(AppContext);
-  if (!ctx) throw new Error("useApp must be used within <AppProvider />");
-  return ctx;
-}
-
 // --- helpers (frontend-side robustness) ---
 function coerceBoolish(v: any, fallback = false): boolean {
   if (typeof v === "boolean") return v;
@@ -201,6 +207,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [adminBusy, setAdminBusy] = useState(false);
+  const [adminError, setAdminError] = useState("");
 
   const [contestsBusy, setContestsBusy] = useState(false);
   const [contestsError, setContestsError] = useState("");
@@ -266,6 +275,44 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [baseUrl]);
 
+  async function checkAdminAccess(): Promise<boolean> {
+    if (!auth.currentUser) {
+      setIsAdmin(false);
+      setAdminBusy(false);
+      setAdminError("");
+      return false;
+    }
+
+    setAdminBusy(true);
+    setAdminError("");
+    try {
+      const data = await apiFetch<AdminAccessResponse>("/admin/access");
+      const ok = data?.is_admin === true;
+      setIsAdmin(ok);
+      return ok;
+    } catch (err: any) {
+      const message = String(err?.message ?? err ?? "");
+      const normalized = message.trim().toLowerCase();
+
+      if (
+        normalized.includes("admin required") ||
+        normalized.includes("not authenticated") ||
+        normalized.includes("forbidden") ||
+        normalized.includes("http 403") ||
+        normalized.includes("http 401")
+      ) {
+        setIsAdmin(false);
+        return false;
+      }
+
+      setIsAdmin(false);
+      setAdminError(message || "Could not verify admin access.");
+      return false;
+    } finally {
+      setAdminBusy(false);
+    }
+  }
+
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u);
@@ -292,9 +339,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setHistSeries(null);
         setMsg("");
         setTrainMsg("");
+        setIsAdmin(false);
+        setAdminBusy(false);
+        setAdminError("");
       } else {
         setPage("select");
+        setIsAdmin(false);
+        setAdminError("");
         void loadContests();
+        void checkAdminAccess();
       }
     });
 
@@ -635,6 +688,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setMsg,
     login,
     logout,
+    isAdmin,
+    adminBusy,
+    adminError,
+    checkAdminAccess,
 
     contestsBusy,
     contestsError,

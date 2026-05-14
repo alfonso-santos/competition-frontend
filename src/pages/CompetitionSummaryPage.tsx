@@ -7,9 +7,21 @@ import { Badge } from "../components/ui/Badge";
 import { SecondaryBlueButton } from "../components/ui/Button";
 import { ProgressCharts } from "../components/charts/ProgressCharts";
 
-import { useApp } from "../context/AppContext";
+import { useApp } from "../context/useApp";
 import { primaryMetricLabel } from "../lib/metrics";
 import { apiFetch } from "../lib/api";
+
+import {
+  ResponsiveContainer,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  Brush,
+} from "recharts";
 
 // -----------------------------
 // Helpers
@@ -30,6 +42,28 @@ function fmtPct(x: any): string {
   const n = Number(x);
   if (!Number.isFinite(n)) return "—";
   return `${(n * 100).toFixed(2)}%`;
+}
+
+function csvEscape(v: any): string {
+  const s = String(v ?? "");
+  // CSV con ;, escapado estándar
+  if (/[;"\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function downloadCsvExcelFriendly(rows: string[], filename: string) {
+  const csv = "\uFEFF" + rows.join("\n"); // BOM UTF-8 para Excel
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  URL.revokeObjectURL(url);
 }
 
 // -----------------------------
@@ -74,56 +108,70 @@ function BestMetrics({
 }
 
 // -----------------------------
-// Lightweight equity chart (SVG)
+// Equity chart (Recharts)
 // -----------------------------
 function EquityCompareChart({
-  dates,
   wealthMe,
   wealthChampion,
+  height = 520,
 }: {
-  dates: string[];
   wealthMe: number[];
   wealthChampion: number[] | null;
+  height?: number;
 }) {
-  if (!dates.length || !wealthMe.length) {
+  const n = Math.min(
+    wealthMe?.length ?? 0,
+    wealthChampion ? wealthChampion.length : Infinity
+  );
+
+  if (!Array.isArray(wealthMe) || wealthMe.length < 2 || n < 2) {
     return <div className="mt-3 text-sm text-slate-600">No equity data.</div>;
   }
 
-  const n = Math.min(dates.length, wealthMe.length, wealthChampion?.length ?? Infinity);
-  if (n <= 1) return <div className="mt-3 text-sm text-slate-600">No equity data.</div>;
+  const me0 = wealthMe[0] || 1;
+  const ch0 = wealthChampion ? (wealthChampion[0] || 1) : null;
 
-  const norm = (arr: number[]) => {
-    const x0 = arr[0] || 1;
-    return arr.slice(0, n).map((x) => x / x0);
-  };
-
-  const me = norm(wealthMe);
-  const ch = wealthChampion ? norm(wealthChampion) : null;
-
-  const all = ch ? me.concat(ch) : me;
-  const ymin = Math.min(...all);
-  const ymax = Math.max(...all);
-
-  const W = 900;
-  const H = 220;
-  const P = 18;
-
-  const x = (i: number) => P + (i / (n - 1)) * (W - 2 * P);
-  const y = (v: number) => P + (1 - (v - ymin) / (ymax - ymin || 1)) * (H - 2 * P);
-
-  const path = (arr: number[]) =>
-    arr
-      .map((v, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(v)}`)
-      .join(" ");
+  const data = Array.from({ length: n }, (_, i) => ({
+    t: i + 1,
+    me: wealthMe[i] / me0,
+    ch: wealthChampion ? wealthChampion[i] / (ch0 || 1) : null,
+  }));
 
   return (
-    <div className="mt-4 overflow-hidden rounded-2xl ring-1 ring-slate-200 bg-white">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-[220px]">
-        <path d={path(me)} fill="none" stroke="rgba(4,120,87,0.7)" strokeWidth="3" />
-        {ch ? (
-          <path d={path(ch)} fill="none" stroke="rgba(3,105,161,0.7)" strokeWidth="3" />
-        ) : null}
-      </svg>
+    <div className="mt-4 rounded-2xl ring-1 ring-slate-200 bg-white p-3">
+      <div style={{ width: "100%", height }}>
+        <ResponsiveContainer>
+          <LineChart data={data} margin={{ top: 10, right: 18, bottom: 10, left: 10 }}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis
+              dataKey="t"
+              tickLine={false}
+              axisLine={true}
+              label={{ value: "Day", position: "insideBottomRight", offset: -6 }}
+            />
+            <YAxis
+              tickLine={false}
+              axisLine={true}
+              domain={["auto", "auto"]}
+              label={{ value: "Normalized wealth", angle: -90, position: "insideLeft" }}
+            />
+            <Tooltip
+              formatter={(v: any, name: any) => [Number(v).toFixed(4), name]}
+              labelFormatter={(l) => `Day ${l}`}
+            />
+            <Legend />
+            <Line type="monotone" dataKey="me" name="You" dot={false} strokeWidth={2.5} />
+            {wealthChampion ? (
+              <Line type="monotone" dataKey="ch" name="Champion" dot={false} strokeWidth={2.5} />
+            ) : null}
+            <Brush dataKey="t" height={28} travellerWidth={10} />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div className="mt-2 text-xs text-slate-500">
+        Tip: arrastra el área inferior (Brush) para “zoom” por rango.
+      </div>
     </div>
   );
 }
@@ -164,7 +212,7 @@ export default function CompetitionSummaryPage() {
   const fallbackPrimaryMetricKey = String(ranking?.primary_metric ?? "");
 
   // -----------------------------
-  // Final summary (single source of truth for equity + best submission)
+  // Final summary (equity + best ids)
   // -----------------------------
   const [fsBusy, setFsBusy] = useState(false);
   const [fsError, setFsError] = useState("");
@@ -176,7 +224,7 @@ export default function CompetitionSummaryPage() {
     setFsError("");
     try {
       const r: any = await apiFetch(
-        `/contests/${selectedContestId}/final_summary?tail=0&top_n=20`
+        `/contests/${encodeURIComponent(selectedContestId)}/final_summary?tail=0&top_n=200`
       );
       setFinalSummary(r ?? null);
     } catch (e: any) {
@@ -188,17 +236,56 @@ export default function CompetitionSummaryPage() {
   }
 
   // -----------------------------
+  // Download leaderboard (CSV Excel-friendly)
+  // -----------------------------
+  const [dlBusy, setDlBusy] = useState(false);
+  const [dlErr, setDlErr] = useState("");
+
+  async function downloadLeaderboardCsv() {
+    if (!selectedContestId) return;
+    setDlBusy(true);
+    setDlErr("");
+
+    try {
+      const LIMIT = 200;
+
+      const r: any = await apiFetch(
+        `/contests/${encodeURIComponent(selectedContestId)}/leaderboard?limit=${encodeURIComponent(String(LIMIT))}`
+      );
+
+      const top: any[] = Array.isArray(r?.top) ? r.top : [];
+      if (!top.length) throw new Error("Empty leaderboard response.");
+
+      const metricKey = String(r?.contest?.ranking?.primary_metric ?? primaryMetricKey ?? "metric");
+
+      const rows: string[] = [];
+      rows.push(["rank", "name", metricKey].map(csvEscape).join(";"));
+
+      for (const it of top) {
+        const rank = it?.rank ?? "";
+        const name = it?.display_name ?? it?.actor_id ?? "";
+        const metricValue = it?.best_score ?? "";
+        rows.push([rank, name, metricValue].map(csvEscape).join(";"));
+      }
+
+      downloadCsvExcelFriendly(rows, `final_leaderboard_${selectedContestId}.csv`);
+    } catch (e: any) {
+      setDlErr(e?.message ?? "Failed to download leaderboard.");
+    } finally {
+      setDlBusy(false);
+    }
+  }
+
+  // -----------------------------
   // Load base data
   // -----------------------------
   useEffect(() => {
     if (!selectedContestId) return;
 
-    // Keep these (cheap + already used elsewhere)
     if (!meData && !meBusy) loadMe();
-    if (!lbBusy && !lbData) loadLeaderboard(20);
+    if (!lbBusy && !lbData) loadLeaderboard(200);
     if (!histBusy && (!histItems || histItems.length === 0)) loadSubmissions(200);
 
-    // Summary for equity + best submission ids
     loadFinalSummary();
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -224,40 +311,37 @@ export default function CompetitionSummaryPage() {
     finalSummary?.me?.last_submission_id ??
     null;
 
-  // Load best submission detail (to show weights + metrics)
-    useEffect(() => {
+  // Load best submission detail (weights + metrics)
+  useEffect(() => {
     if (!bestSubmissionId || !selectedContestId) return;
     loadSubmissionDetail(selectedContestId, bestSubmissionId);
-    }, [bestSubmissionId, selectedContestId]);
+  }, [bestSubmissionId, selectedContestId, loadSubmissionDetail]);
 
+  // NOTE: get_my_submission devuelve { contest_id, submission_id, submission: {...} }
+  const subAny: any = (histDetail as any)?.submission ?? histDetail ?? null;
 
+  const bestMetrics =
+    subAny?.metrics ??
+    subAny?.validated?.metrics ??
+    null;
 
-    const bestMetrics =
-        histDetail?.metrics ??
-        histDetail?.validated?.metrics ??
-        null;
+  const bestWeights =
+    subAny?.validated?.weights ??
+    subAny?.weights ??
+    null;
 
-    const bestWeights =
-        histDetail?.weights ??
-        histDetail?.validated?.weights ??
-        null;
-
-    const bestFi =
-        histDetail?.fixed_income_weight ??
-        histDetail?.validated?.fixed_income_weight ??
-        histDetail?.validated?.fixedIncomeWeight ??
-        null;
-
+  const bestFi =
+    subAny?.validated?.fixed_income_weight ??
+    subAny?.fixed_income_weight ??
+    null;
 
   // Equity from final_summary
   const aligned = finalSummary?.series?.aligned_wealth ?? null;
-  const dates: string[] = aligned?.dates ?? [];
-  const wealthMe: number[] = aligned?.wealth_me ?? [];
-  const wealthChampion: number[] | null = aligned?.wealth_champion ?? null;
+  const wealthMe: number[] = Array.isArray(aligned?.wealth_me) ? aligned.wealth_me : [];
+  const wealthChampion: number[] | null =
+    Array.isArray(aligned?.wealth_champion) ? aligned.wealth_champion : null;
 
-  // -----------------------------
   // Progress chart (from history)
-  // -----------------------------
   const progressSeries = useMemo(() => {
     const items = [...(histItems ?? [])].reverse();
     let best: number | null = null;
@@ -282,7 +366,7 @@ export default function CompetitionSummaryPage() {
         title="Competition summary"
         apiStatus={apiStatus}
         user={user}
-        busy={Boolean(meBusy || lbBusy || histBusy || histDetailBusy || fsBusy)}
+        busy={Boolean(meBusy || lbBusy || histBusy || histDetailBusy || fsBusy || dlBusy)}
         onLogout={logout}
         right={
           <SecondaryBlueButton type="button" onClick={() => setPage("select")}>
@@ -322,7 +406,56 @@ export default function CompetitionSummaryPage() {
 
           <div className="mt-6 rounded-3xl bg-white/80 p-6 ring-1 ring-slate-200">
             <h3 className="text-lg font-semibold">Equity curve (You vs Champion)</h3>
-            <EquityCompareChart dates={dates} wealthMe={wealthMe} wealthChampion={wealthChampion} />
+            <EquityCompareChart wealthMe={wealthMe} wealthChampion={wealthChampion} height={520} />
+          </div>
+
+          <div className="mt-6 rounded-3xl bg-white/80 p-6 ring-1 ring-slate-200">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-lg font-semibold">Final leaderboard</h3>
+
+              <div className="flex items-center gap-2">
+                <SecondaryBlueButton type="button" onClick={downloadLeaderboardCsv} disabled={dlBusy}>
+                  {dlBusy ? "Preparing…" : "Download CSV (Excel)"}
+                </SecondaryBlueButton>
+              </div>
+            </div>
+
+            <div className="mt-1 text-xs text-slate-600">
+              Download includes rank, name, and {primaryMetricLabel(primaryMetricKey)} (up to 200).
+            </div>
+
+            {dlErr ? <div className="mt-2 text-sm text-rose-700">{dlErr}</div> : null}
+
+            <div className="mt-4 overflow-auto rounded-2xl ring-1 ring-slate-200 bg-white">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50">
+                  <tr className="text-left">
+                    <th className="px-3 py-2">Rank</th>
+                    <th className="px-3 py-2">Name</th>
+                    <th className="px-3 py-2">{primaryMetricLabel(primaryMetricKey)}</th>
+                    <th className="px-3 py-2">Submissions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(Array.isArray(lbData?.top) ? lbData.top : []).map((row: any) => (
+                    <tr key={`${row.rank}-${row.actor_id ?? ""}`} className="border-t">
+                      <td className="px-3 py-2 tabular-nums">{row.rank}</td>
+                      <td className="px-3 py-2">{row.display_name ?? "—"}</td>
+                      <td className="px-3 py-2 tabular-nums">{fmtNum(row.best_score, 6)}</td>
+                      <td className="px-3 py-2 tabular-nums">{row.n_submissions ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {Number.isFinite(Number(lbData?.total_participants)) &&
+            Array.isArray(lbData?.top) &&
+            lbData.top.length < (lbData.total_participants ?? 0) ? (
+              <div className="mt-2 text-xs text-slate-600">
+                Showing {lbData.top.length} of {lbData.total_participants}. (Download fetches up to 200.)
+              </div>
+            ) : null}
           </div>
 
           <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -330,9 +463,7 @@ export default function CompetitionSummaryPage() {
               <h3 className="text-lg font-semibold">Your best submission</h3>
               <div className="mt-1 text-sm text-slate-600">
                 Submission id:{" "}
-                <span className="font-mono">
-                  {bestSubmissionId ? shortId(bestSubmissionId) : "—"}
-                </span>
+                <span className="font-mono">{bestSubmissionId ? shortId(bestSubmissionId) : "—"}</span>
               </div>
 
               {histDetailBusy ? (

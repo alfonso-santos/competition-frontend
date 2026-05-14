@@ -1,7 +1,7 @@
 // src/pages/LandingPage.tsx
 import { StatusChip } from "../components/ui/StatusChip";
 import { PrimaryGreenButton } from "../components/ui/Button";
-import { useApp } from "../context/AppContext";
+import { useApp } from "../context/useApp";
 
 export default function LandingPage() {
   const {

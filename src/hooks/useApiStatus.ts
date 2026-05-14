@@ -3,19 +3,26 @@ import { publicFetch } from "../lib/api";
 import type { ApiStatus } from "../lib/types";
 
 export function useApiStatus() {
-  const [apiStatus, setApiStatus] = useState<ApiStatus>("checking");
+  const [remoteStatus, setRemoteStatus] = useState<"checking" | "ok" | "down">("checking");
   const baseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "";
 
   useEffect(() => {
-    if (!baseUrl) {
-      setApiStatus("missing_base_url");
-      return;
-    }
-    setApiStatus("checking");
+    if (!baseUrl) return;
+
+    let cancelled = false;
     publicFetch("/health")
-      .then(() => setApiStatus("ok"))
-      .catch(() => setApiStatus("down"));
+      .then(() => {
+        if (!cancelled) setRemoteStatus("ok");
+      })
+      .catch(() => {
+        if (!cancelled) setRemoteStatus("down");
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [baseUrl]);
 
+  const apiStatus: ApiStatus = baseUrl ? remoteStatus : "missing_base_url";
   return { apiStatus, baseUrl };
 }
